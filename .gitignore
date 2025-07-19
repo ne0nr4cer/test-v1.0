@@ -1,0 +1,10 @@
+# Go 
+scanner.exe 
+*.exe 
+*.out 
+*.test 
+ 
+# IDE/editor 
+.vscode/ 
+.idea/ 
+*.swp
