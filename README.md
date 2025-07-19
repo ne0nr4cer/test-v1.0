@@ -4,7 +4,8 @@ Simple command-line network scanner written in Go.
 
 ## Example
 
-scanner.exe -net 192.168.1.1 -v -t 10 -i eth0
+run scanner.exe<br>
+-net 192.168.1.1 -v -t 10 -i eth0
 
 ## Flags
 

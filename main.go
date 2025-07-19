@@ -9,39 +9,44 @@ import (
 )
 
 func main() {
-	fmt.Print("Enter parameters (e.g., 10.0.0.1 -v -t 10 -i eth0): ")
+	// Запрос ввода параметров от пользователя
+	fmt.Print("Enter parameters (e.g., -net 10.0.0.1 -v -t 10 -i eth0): ")
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
 	args := strings.Fields(strings.TrimSpace(input))
 
+	// Создание нового набора флагов
 	fs := flag.NewFlagSet("scanner", flag.ContinueOnError)
-	help := fs.Bool("help", false, "Show help")
-	verbose := fs.Bool("v", false, "Enable verbose output")
-	version := fs.Bool("V", false, "Show program version")
-	timeout := fs.Int("t", 5, "Timeout in seconds")
-	iface := fs.String("i", "default", "Network interface to use")
-	output := fs.String("o", "", "Output file for results")
-	csv := fs.Bool("csv", false, "Save result in CSV format")
-	noping := fs.Bool("noping", false, "Skip ping check")
-	debug := fs.Bool("debug", false, "Enable debug logging")
 
+	// Объявление поддерживаемых флагов
+	help := fs.Bool("help", false, "Show help")                                  // показать справку
+	version := fs.Bool("V", false, "Show program version")                       // показать версию
+	verbose := fs.Bool("v", false, "Enable verbose output")                      // подробный вывод
+	timeout := fs.Int("t", 5, "Timeout in seconds")                              // таймаут в секундах
+	iface := fs.String("i", "default", "Network interface to use")               // сетевой интерфейс
+	output := fs.String("o", "", "Output file for results")                      // файл для результатов
+	csv := fs.Bool("csv", false, "Save result in CSV format")                    // сохранить в CSV
+	noping := fs.Bool("noping", false, "Skip ping check")                        // не пинговать
+	debug := fs.Bool("debug", false, "Enable debug mode")                        // включить отладку
+	network := fs.String("net", "local", "Target network or IP address to scan") // цель сканирования
+
+	// Парсинг введённых аргументов
 	fs.Parse(args)
-	parsed := fs.Args()
-	ip := "local"
-	if len(parsed) > 0 {
-		ip = parsed[0]
-	}
 
+	// Обработка версии
 	if *version {
 		PrintVersion()
 		os.Exit(0)
 	}
+
+	// Обработка справки
 	if *help {
 		PrintHelp()
 		os.Exit(0)
 	}
 
-	fmt.Println("ip:", ip)
+	// Вывод разобранных значений
+	fmt.Println("ip:", *network)
 	fmt.Println("-v (verbose):", boolToInt(*verbose))
 	fmt.Println("-V (version):", boolToInt(*version))
 	fmt.Println("-t (timeout):", *timeout)
@@ -52,6 +57,7 @@ func main() {
 	fmt.Println("-debug:", boolToInt(*debug))
 }
 
+// Преобразование булевого значения в 0 или 1
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -59,9 +65,10 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-func valueOrDefault(val, def string) string {
-	if val == "" {
+// Возврат значения или значения по умолчанию, если пусто
+func valueOrDefault(value, def string) string {
+	if value == "" {
 		return def
 	}
-	return val
+	return value
 }
