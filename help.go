@@ -2,18 +2,19 @@ package main
 
 import "fmt"
 
-// Функция вывода справки по флагам
+// PrintHelp выводит справку по доступным флагам
 func PrintHelp() {
-	fmt.Println("Usage: [flags]")
-	fmt.Println("Available flags:")
-	fmt.Println("  -help          Show this help message")                                // справка
-	fmt.Println("  -net <CIDR/IP> Target network or IP address to scan (default: local)") // IP/сеть
-	fmt.Println("  -v             Enable verbose output")                                 // подробный вывод
-	fmt.Println("  -V             Show program version")                                  // версия
-	fmt.Println("  -t <seconds>   Timeout in seconds (default: 5)")                       // таймаут
-	fmt.Println("  -i <iface>     Network interface to use (default: \"default\")")       // интерфейс
-	fmt.Println("  -o <file>      Output file to save results")                           // файл вывода
-	fmt.Println("  -csv           Save results in CSV format")                            // сохранить в CSV
-	fmt.Println("  -noping        Skip ping check before scanning")                       // не использовать ping
-	fmt.Println("  -debug         Enable debug logging")                                  // отладка
+	fmt.Println("\nAvailable flags:")
+	fmt.Println("  -h, --help           Show help message")
+	fmt.Println("  -N, --net <addr>     Target network or IP to scan (default: local)")
+	fmt.Println("  -v, --verbose        Enable verbose output")
+	fmt.Println("  -V, --version        Show version info")
+	fmt.Println("  -t, --timeout <sec>  Timeout in seconds (default: 5)")
+	fmt.Println("  -i, --interface <if> Network interface (default: \"default\")")
+	fmt.Println("  -o, --output <file>  Output file path")
+	fmt.Println("  -c, --csv            Save result as CSV")
+	fmt.Println("  -n, --noping         Skip ping check")
+	fmt.Println("  -d, --debug          Enable debug mode")
+	fmt.Println()
+	fmt.Println("Use -h or --help to see this message again.")
 }

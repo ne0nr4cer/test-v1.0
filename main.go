@@ -2,62 +2,94 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
+	"github.com/spf13/pflag"
 )
 
 func main() {
-	// Запрос ввода параметров от пользователя
-	fmt.Print("Enter parameters (e.g., -net 10.0.0.1 -v -t 10 -i eth0): ")
-	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
-	args := strings.Fields(strings.TrimSpace(input))
+	// Хинт и пример
+	fmt.Println("You can use -h or --help to list flags.")
+	fmt.Println("Example: -N 192.168.1.1 -v -t 5 -i eth0 -c")
+	fmt.Print(": ")
 
-	// Создание нового набора флагов
-	fs := flag.NewFlagSet("scanner", flag.ContinueOnError)
+	// Читаем строку из stdin
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	args := strings.Fields(strings.TrimSpace(line))
 
-	// Объявление поддерживаемых флагов
-	help := fs.Bool("help", false, "Show help")                                  // показать справку
-	version := fs.Bool("V", false, "Show program version")                       // показать версию
-	verbose := fs.Bool("v", false, "Enable verbose output")                      // подробный вывод
-	timeout := fs.Int("t", 5, "Timeout in seconds")                              // таймаут в секундах
-	iface := fs.String("i", "default", "Network interface to use")               // сетевой интерфейс
-	output := fs.String("o", "", "Output file for results")                      // файл для результатов
-	csv := fs.Bool("csv", false, "Save result in CSV format")                    // сохранить в CSV
-	noping := fs.Bool("noping", false, "Skip ping check")                        // не пинговать
-	debug := fs.Bool("debug", false, "Enable debug mode")                        // включить отладку
-	network := fs.String("net", "local", "Target network or IP address to scan") // цель сканирования
+	// Создаём FlagSet и регистрируем флаги
+	flags := pflag.NewFlagSet("scanner", pflag.ContinueOnError)
+	help := flags.BoolP("help", "h", false, "Show help message")
+	version := flags.BoolP("version", "V", false, "Show version info")
+	verbose := flags.BoolP("verbose", "v", false, "Enable verbose output")
+	timeout := flags.IntP("timeout", "t", 5, "Timeout in seconds")
+	iface := flags.StringP("interface", "i", "default", "Network interface to capture from")
+	output := flags.StringP("output", "o", "", "Output file")
+	csv := flags.BoolP("csv", "c", false, "Save result as CSV")
+	noping := flags.BoolP("noping", "n", false, "Skip ping check")
+	debug := flags.BoolP("debug", "d", false, "Enable debug mode")
+	network := flags.StringP("net", "N", "local", "Target network or IP to scan")
 
-	// Парсинг введённых аргументов
-	fs.Parse(args)
-
-	// Обработка версии
-	if *version {
-		PrintVersion()
-		os.Exit(0)
+	// Парсим введённые args
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "Error parsing flags:", err)
+		return
 	}
 
-	// Обработка справки
+	// --help / --version
 	if *help {
 		PrintHelp()
-		os.Exit(0)
+		return
+	}
+	if *version {
+		PrintVersion()
+		return
 	}
 
-	// Вывод разобранных значений
-	fmt.Println("ip:", *network)
-	fmt.Println("-v (verbose):", boolToInt(*verbose))
-	fmt.Println("-V (version):", boolToInt(*version))
-	fmt.Println("-t (timeout):", *timeout)
-	fmt.Println("-i (interface):", *iface)
-	fmt.Println("-o (output file):", valueOrDefault(*output, "none"))
-	fmt.Println("-csv:", boolToInt(*csv))
-	fmt.Println("-noping:", boolToInt(*noping))
-	fmt.Println("-debug:", boolToInt(*debug))
+	// verbose — показываем все параметры, в том числе output/noping/debug
+	if *verbose {
+		fmt.Println("Parsed options:")
+		fmt.Printf("  ip:             %s\n", *network)
+		fmt.Printf("  -v/--verbose:   %t\n", *verbose)
+		fmt.Printf("  -t/--timeout:   %d\n", *timeout)
+		fmt.Printf("  -i/--interface: %s\n", *iface)
+		fmt.Printf("  -o/--output:    %q\n", *output)
+		fmt.Printf("  -c/--csv:       %t\n", *csv)
+		fmt.Printf("  -n/--noping:    %t\n", *noping)
+		fmt.Printf("  -d/--debug:     %t\n", *debug)
+		fmt.Println()
+	}
+
+	// Запускаем захват и вывод MAC-адресов
+	captureMACs(*iface, int32(65535), true, time.Duration(*timeout)*time.Second)
 }
 
-// Преобразование булевого значения в 0 или 1
+// captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета
+func captureMACs(iface string, snaplen int32, promisc bool, timeout time.Duration) {
+	handle, err := pcap.OpenLive(iface, snaplen, promisc, timeout)
+	if err != nil {
+		log.Fatalf("pcap.OpenLive failed: %v", err)
+	}
+	defer handle.Close()
+
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	fmt.Printf("Capturing on %q (press Ctrl+C to stop)...\n\n", iface)
+	for packet := range packetSource.Packets() {
+		if eth := packet.Layer(layers.LayerTypeEthernet); eth != nil {
+			e := eth.(*layers.Ethernet)
+			fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
+		}
+	}
+}
+
+// boolToInt превращает true→1, false→0
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -65,10 +97,10 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// Возврат значения или значения по умолчанию, если пусто
-func valueOrDefault(value, def string) string {
-	if value == "" {
+// valueOrDefault возвращает val, если непустой, иначе def
+func valueOrDefault(val, def string) string {
+	if val == "" {
 		return def
 	}
-	return value
+	return val
 }

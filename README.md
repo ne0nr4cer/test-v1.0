@@ -2,20 +2,16 @@
 
 Simple command-line network scanner written in Go.
 
+# Network Scanner
+
+Simple command-line network scanner written in Go.
+
 ## Example
 
-run scanner.exe<br>
--net 192.168.1.1 -v -t 10 -i eth0
+Run the scanner and then enter parameters, for example:
 
-## Flags
+```bash
+scanner.exe
+: -N 192.168.1.1 -v -t 10 -i eth0 -c
 
-- `-help`: Show help
-- `-net`: Target network/IP
-- `-v`: Verbose output
-- `-V`: Version info
-- `-t`: Timeout (seconds)
-- `-i`: Interface
-- `-o`: Output file
-- `-csv`: Save output as CSV
-- `-noping`: Skip ping
-- `-debug`: Enable debug mode
+```
