@@ -116,8 +116,11 @@ func main() {
 // captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета,
 // автоматически завершаясь по истечении указанного timeout.
 // Для чтения пакетов используется readTimeout=1s.
-func captureMACs(iface string, snaplen int32, promisc bool, timeout time.Duration) {
-	const readTimeout = time.Second
+// captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета,
+// прекращая захват через exitTimeout.
+// Для чтения пакетов используется фиксированный readTimeout.
+func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Duration) {
+	const readTimeout = time.Second // фиксированный, не меняется флагом
 
 	handle, err := pcap.OpenLive(iface, snaplen, promisc, readTimeout)
 	if err != nil {
@@ -128,22 +131,41 @@ func captureMACs(iface string, snaplen int32, promisc bool, timeout time.Duratio
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	packets := packetSource.Packets()
 
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(exitTimeout)
 	defer timer.Stop()
 
-	fmt.Printf("Capturing on %q (will stop after %v)...\n\n", iface, timeout)
+	fmt.Printf("Capturing on %q (will stop after %v)...\n\n", iface, exitTimeout)
 	for {
 		select {
 		case packet, ok := <-packets:
 			if !ok {
 				return
 			}
+			// Ethernet + IP/ARP как раньше
 			if eth := packet.Layer(layers.LayerTypeEthernet); eth != nil {
 				e := eth.(*layers.Ethernet)
+				// ARP?
+				if arpL := packet.Layer(layers.LayerTypeARP); arpL != nil {
+					arp := arpL.(*layers.ARP)
+					srcIP := net.IP(arp.SourceProtAddress)
+					dstIP := net.IP(arp.DstProtAddress)
+					fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
+						e.SrcMAC, srcIP, e.DstMAC, dstIP)
+					continue
+				}
+				// IPv4?
+				if ip4L := packet.Layer(layers.LayerTypeIPv4); ip4L != nil {
+					ip4 := ip4L.(*layers.IPv4)
+					fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
+						e.SrcMAC, ip4.SrcIP, e.DstMAC, ip4.DstIP)
+					continue
+				}
+				// только MAC
 				fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
 			}
+
 		case <-timer.C:
-			fmt.Printf("\nExit timeout reached (%v). Stopping capture.\n", timeout)
+			fmt.Printf("\nExit timeout reached (%v). Stopping capture.\n", exitTimeout)
 			return
 		}
 	}
