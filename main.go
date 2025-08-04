@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +15,31 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/pflag"
 )
+
+// detectDefaultInterface возвращает первый активный нефлаг loopback интерфейс с IPv4
+func detectDefaultInterface() (string, error) {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifs {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.IP.To4() != nil {
+					return iface.Name, nil
+				}
+			}
+		}
+	}
+	return "", errors.New("no suitable interface found")
+}
 
 func main() {
 	// Хинт и пример
@@ -24,7 +51,7 @@ func main() {
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	args := strings.Fields(strings.TrimSpace(line))
 
-	// Создаём FlagSet и регистрируем флаги
+	// Настройка парсера флагов
 	flags := pflag.NewFlagSet("scanner", pflag.ContinueOnError)
 	help := flags.BoolP("help", "h", false, "Show help message")
 	version := flags.BoolP("version", "V", false, "Show version info")
@@ -43,7 +70,7 @@ func main() {
 		return
 	}
 
-	// --help / --version
+	// Обработка --help и --version
 	if *help {
 		PrintHelp()
 		return
@@ -53,7 +80,19 @@ func main() {
 		return
 	}
 
-	// verbose — показываем все параметры, в том числе output/noping/debug
+	// Автоопределение интерфейса, если не указан
+	if *iface == "default" {
+		autoIf, err := detectDefaultInterface()
+		if err != nil {
+			log.Fatalf("Interface detection failed: %v", err)
+		}
+		if *verbose {
+			fmt.Printf("Auto-selected interface: %s\n", autoIf)
+		}
+		*iface = autoIf
+	}
+
+	// Вывод распознанных опций в verbose режиме
 	if *verbose {
 		fmt.Println("Parsed options:")
 		fmt.Printf("  ip:             %s\n", *network)
@@ -67,24 +106,45 @@ func main() {
 		fmt.Println()
 	}
 
-	// Запускаем захват и вывод MAC-адресов
-	captureMACs(*iface, int32(65535), true, time.Duration(*timeout)*time.Second)
+	// Время работы = timeout секунд
+	runDuration := time.Duration(*timeout) * time.Second
+
+	// Запускаем захват и вывод MAC-адресов с общим таймаутом
+	captureMACs(*iface, 65535, true, runDuration)
 }
 
-// captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета
+// captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета,
+// автоматически завершаясь по истечении указанного timeout.
+// Для чтения пакетов используется readTimeout=1s.
 func captureMACs(iface string, snaplen int32, promisc bool, timeout time.Duration) {
-	handle, err := pcap.OpenLive(iface, snaplen, promisc, timeout)
+	const readTimeout = time.Second
+
+	handle, err := pcap.OpenLive(iface, snaplen, promisc, readTimeout)
 	if err != nil {
 		log.Fatalf("pcap.OpenLive failed: %v", err)
 	}
 	defer handle.Close()
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	fmt.Printf("Capturing on %q (press Ctrl+C to stop)...\n\n", iface)
-	for packet := range packetSource.Packets() {
-		if eth := packet.Layer(layers.LayerTypeEthernet); eth != nil {
-			e := eth.(*layers.Ethernet)
-			fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
+	packets := packetSource.Packets()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	fmt.Printf("Capturing on %q (will stop after %v)...\n\n", iface, timeout)
+	for {
+		select {
+		case packet, ok := <-packets:
+			if !ok {
+				return
+			}
+			if eth := packet.Layer(layers.LayerTypeEthernet); eth != nil {
+				e := eth.(*layers.Ethernet)
+				fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
+			}
+		case <-timer.C:
+			fmt.Printf("\nExit timeout reached (%v). Stopping capture.\n", timeout)
+			return
 		}
 	}
 }
