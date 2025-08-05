@@ -10,7 +10,7 @@ Simple command-line network scanner written in Go.
 
 Run the scanner and then enter parameters, for example:
 
-```bash
+```
 scanner.exe
 : -N 192.168.1.1 -v -t 10 -i eth0 -c
 

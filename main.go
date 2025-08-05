@@ -114,9 +114,6 @@ func main() {
 }
 
 // captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета,
-// автоматически завершаясь по истечении указанного timeout.
-// Для чтения пакетов используется readTimeout=1s.
-// captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета,
 // прекращая захват через exitTimeout.
 // Для чтения пакетов используется фиксированный readTimeout.
 func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Duration) {
