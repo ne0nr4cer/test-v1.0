@@ -16,7 +16,53 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// detectDefaultInterface возвращает первый активный нефлаг loopback интерфейс с IPv4
+type flowPair struct {
+	SrcMAC, SrcIP string
+	DstMAC, DstIP string
+}
+
+var (
+	pairSeen    = make(map[string]struct{})
+	pairResults []flowPair
+)
+
+func makePairKey(srcMAC, srcIP, dstMAC, dstIP string) string {
+	a := srcMAC + "," + srcIP
+	b := dstMAC + "," + dstIP
+	if a <= b {
+		return a + "||" + b
+	}
+	return b + "||" + a
+}
+
+func recordPair(srcMAC, srcIP, dstMAC, dstIP string) bool {
+	if srcIP == "" || dstIP == "" {
+		return false
+	}
+	key := makePairKey(srcMAC, srcIP, dstMAC, dstIP)
+	if _, ok := pairSeen[key]; ok {
+		return false
+	}
+	pairSeen[key] = struct{}{}
+	pairResults = append(pairResults, flowPair{SrcMAC: srcMAC, SrcIP: srcIP, DstMAC: dstMAC, DstIP: dstIP})
+	return true
+}
+
+func writeCSV() {
+	f, err := os.Create("results.csv")
+	if err != nil {
+		log.Printf("Cannot create CSV file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	fmt.Fprintln(f, "N,SrcMAC,SrcIP,DstMAC,DstIP")
+	for i, p := range pairResults {
+		fmt.Fprintf(f, "%d,%s,%s,%s,%s\n", i+1, p.SrcMAC, p.SrcIP, p.DstMAC, p.DstIP)
+	}
+	fmt.Printf("Results written to results.csv (%d pairs)\n", len(pairResults))
+}
+
 func detectDefaultInterface() (string, error) {
 	ifs, err := net.Interfaces()
 	if err != nil {
@@ -42,16 +88,13 @@ func detectDefaultInterface() (string, error) {
 }
 
 func main() {
-	// Хинт и пример
 	fmt.Println("You can use -h or --help to list flags.")
 	fmt.Println("Example: -N 192.168.1.1 -v -t 5 -i eth0 -c")
 	fmt.Print(": ")
 
-	// Читаем строку из stdin
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	args := strings.Fields(strings.TrimSpace(line))
 
-	// Настройка парсера флагов
 	flags := pflag.NewFlagSet("scanner", pflag.ContinueOnError)
 	help := flags.BoolP("help", "h", false, "Show help message")
 	version := flags.BoolP("version", "V", false, "Show version info")
@@ -64,13 +107,11 @@ func main() {
 	debug := flags.BoolP("debug", "d", false, "Enable debug mode")
 	network := flags.StringP("net", "N", "local", "Target network or IP to scan")
 
-	// Парсим введённые args
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, "Error parsing flags:", err)
 		return
 	}
 
-	// Обработка --help и --version
 	if *help {
 		PrintHelp()
 		return
@@ -80,7 +121,6 @@ func main() {
 		return
 	}
 
-	// Автоопределение интерфейса, если не указан
 	if *iface == "default" {
 		autoIf, err := detectDefaultInterface()
 		if err != nil {
@@ -92,7 +132,6 @@ func main() {
 		*iface = autoIf
 	}
 
-	// Вывод распознанных опций в verbose режиме
 	if *verbose {
 		fmt.Println("Parsed options:")
 		fmt.Printf("  ip:             %s\n", *network)
@@ -106,18 +145,14 @@ func main() {
 		fmt.Println()
 	}
 
-	// Время работы = timeout секунд
 	runDuration := time.Duration(*timeout) * time.Second
-
-	// Запускаем захват и вывод MAC-адресов с общим таймаутом
 	captureMACs(*iface, 65535, true, runDuration)
+
+	writeCSV()
 }
 
-// captureMACs открывает интерфейс и печатает Src/Dst MAC каждого Ethernet-пакета,
-// прекращая захват через exitTimeout.
-// Для чтения пакетов используется фиксированный readTimeout.
 func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Duration) {
-	const readTimeout = time.Second // фиксированный, не меняется флагом
+	const readTimeout = time.Second
 
 	handle, err := pcap.OpenLive(iface, snaplen, promisc, readTimeout)
 	if err != nil {
@@ -138,29 +173,28 @@ func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Dur
 			if !ok {
 				return
 			}
-			// Ethernet + IP/ARP как раньше
 			if eth := packet.Layer(layers.LayerTypeEthernet); eth != nil {
 				e := eth.(*layers.Ethernet)
-				// ARP?
 				if arpL := packet.Layer(layers.LayerTypeARP); arpL != nil {
 					arp := arpL.(*layers.ARP)
-					srcIP := net.IP(arp.SourceProtAddress)
-					dstIP := net.IP(arp.DstProtAddress)
+					srcIP := net.IP(arp.SourceProtAddress).String()
+					dstIP := net.IP(arp.DstProtAddress).String()
 					fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
 						e.SrcMAC, srcIP, e.DstMAC, dstIP)
+
+					recordPair(e.SrcMAC.String(), srcIP, e.DstMAC.String(), dstIP)
 					continue
 				}
-				// IPv4?
 				if ip4L := packet.Layer(layers.LayerTypeIPv4); ip4L != nil {
 					ip4 := ip4L.(*layers.IPv4)
 					fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
 						e.SrcMAC, ip4.SrcIP, e.DstMAC, ip4.DstIP)
+
+					recordPair(e.SrcMAC.String(), ip4.SrcIP.String(), e.DstMAC.String(), ip4.DstIP.String())
 					continue
 				}
-				// только MAC
 				fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
 			}
-
 		case <-timer.C:
 			fmt.Printf("\nExit timeout reached (%v). Stopping capture.\n", exitTimeout)
 			return
@@ -168,7 +202,6 @@ func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Dur
 	}
 }
 
-// boolToInt превращает true→1, false→0
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -176,7 +209,6 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// valueOrDefault возвращает val, если непустой, иначе def
 func valueOrDefault(val, def string) string {
 	if val == "" {
 		return def
