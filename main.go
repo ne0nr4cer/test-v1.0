@@ -26,6 +26,35 @@ var (
 	pairResults []flowPair
 )
 
+type device struct {
+	MAC string
+	IP  string
+}
+
+var (
+	deviceSeen = make(map[string]struct{}) // key="MAC,IP"
+	deviceList []device
+)
+
+func isBroadcastMAC(mac string) bool {
+	return strings.EqualFold(mac, "ff:ff:ff:ff:ff:ff")
+}
+
+func recordDevice(mac, ip string) {
+	if mac == "" || ip == "" {
+		return
+	}
+	if isBroadcastMAC(mac) {
+		return
+	}
+	key := mac + "," + ip
+	if _, ok := deviceSeen[key]; ok {
+		return
+	}
+	deviceSeen[key] = struct{}{}
+	deviceList = append(deviceList, device{MAC: mac, IP: ip})
+}
+
 func makePairKey(srcMAC, srcIP, dstMAC, dstIP string) string {
 	a := srcMAC + "," + srcIP
 	b := dstMAC + "," + dstIP
@@ -45,10 +74,21 @@ func recordPair(srcMAC, srcIP, dstMAC, dstIP string) bool {
 	}
 	pairSeen[key] = struct{}{}
 	pairResults = append(pairResults, flowPair{SrcMAC: srcMAC, SrcIP: srcIP, DstMAC: dstMAC, DstIP: dstIP})
+
+	recordDevice(srcMAC, srcIP)
+	recordDevice(dstMAC, dstIP)
+
 	return true
 }
 
 func writeCSV() {
+	if len(pairResults) > 0 && len(deviceList) == 0 {
+		for _, p := range pairResults {
+			recordDevice(p.SrcMAC, p.SrcIP)
+			recordDevice(p.DstMAC, p.DstIP)
+		}
+	}
+
 	f, err := os.Create("results.csv")
 	if err != nil {
 		log.Printf("Cannot create CSV file: %v", err)
@@ -56,11 +96,11 @@ func writeCSV() {
 	}
 	defer f.Close()
 
-	fmt.Fprintln(f, "N,SrcMAC,SrcIP,DstMAC,DstIP")
-	for i, p := range pairResults {
-		fmt.Fprintf(f, "%d,%s,%s,%s,%s\n", i+1, p.SrcMAC, p.SrcIP, p.DstMAC, p.DstIP)
+	fmt.Fprintln(f, "IP,MAC")
+	for _, d := range deviceList {
+		fmt.Fprintf(f, "%s,%s\n", d.IP, d.MAC)
 	}
-	fmt.Printf("Results written to results.csv (%d pairs)\n", len(pairResults))
+	fmt.Printf("Results written to results.csv (%d devices)\n", len(deviceList))
 }
 
 func detectDefaultInterface() (string, error) {
