@@ -15,6 +15,8 @@ func PrintHelp() {
 	fmt.Println("  -c, --csv            Save result as CSV")
 	fmt.Println("  -n, --noping         Skip ping check")
 	fmt.Println("  -d, --debug          Enable debug mode")
+	fmt.Println("  -w, --write <file>   Write captured packets to PCAP file")
+	fmt.Println("  -r, --read <file>    Read packets from PCAP file instead of live capture")
 	fmt.Println()
 	fmt.Println("Use -h or --help to see this message again.")
 }
