@@ -17,6 +17,7 @@ func PrintHelp() {
 	fmt.Println("  -d, --debug          Enable debug mode")
 	fmt.Println("  -w, --write <file>   Write captured packets to PCAP file")
 	fmt.Println("  -r, --read <file>    Read packets from PCAP file instead of live capture")
+	fmt.Println("		 , --cidr 					CIDR for local/non-local split in --read mode")
 	fmt.Println()
 	fmt.Println("Use -h or --help to see this message again.")
 }
