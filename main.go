@@ -29,28 +29,63 @@ var (
 )
 
 type device struct {
-	IP  string
-	MAC string
+	IP     string
+	MAC    string
+	Vendor string
 }
 
 var (
-	deviceSeen         = make(map[string]struct{}) // глобальное множество уникальных "MAC,IP"
-	deviceList         []device                    // fallback/общий список
-	deviceLocalList    []device
-	deviceNonLocalList []device
-	localIPStr         string
-	localMACStr        string
-	localCIDR          *net.IPNet
-	localMaskStr       string // "255.255.255.0(24)"
+	deviceSeen      = make(map[string]struct{}) // глобальное множество уникальных "MAC,IP"
+	ouiMap          = make(map[string]string)   // OUI prefix -> Vendor
+	deviceList      []device                    // fallback/общий список
+	deviceLocalList []device
 
-	readingMode bool // true, если работаем в режиме -r/--read
+	// +++ NEW: дополнительные группы +++
+	deviceNonRoutingList []device // RFC1918: 10/8, 172.16/12, 192.168/16
+	deviceGlobalList     []device // все прочие глобальные
+	deviceReservedList   []device // 224.0.0.0–239.255.255.255
+	// --- END NEW ---
+
+	localIPStr   string
+	localMACStr  string
+	localCIDR    *net.IPNet
+	localMaskStr string // "255.255.255.0(24)"
+	readingMode  bool   // true, если работаем в режиме -r/--read
 )
 
 func isBroadcastMAC(mac string) bool {
 	return strings.EqualFold(mac, "ff:ff:ff:ff:ff:ff")
 }
 
-// Запомнить уникальное устройство (MAC,IP); игнорируем broadcast MAC и пустые значения
+// +++ NEW: проверки диапазонов IPv4 +++
+func isRFC1918(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	if ip4[0] == 10 {
+		return true
+	}
+	if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+		return true
+	}
+	if ip4[0] == 192 && ip4[1] == 168 {
+		return true
+	}
+	return false
+}
+
+func isReservedMulticast(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] >= 224 && ip4[0] <= 239
+}
+
+// --- END NEW ---
+
+// Запомнить уникальное устройство (MAC,IP)
 func recordDevice(mac, ip string) {
 	if mac == "" || ip == "" {
 		return
@@ -64,16 +99,25 @@ func recordDevice(mac, ip string) {
 	}
 	deviceSeen[key] = struct{}{}
 
-	// Классификация: local vs non-local по localCIDR
-	d := device{IP: ip, MAC: mac}
+	vendor := findVendor(mac) // <<< добавили
+
+	d := device{IP: ip, MAC: mac, Vendor: vendor} // <<< добавили Vendor
+
 	if localCIDR != nil {
 		if ipParsed := net.ParseIP(ip); ipParsed != nil && localCIDR.Contains(ipParsed) {
 			deviceLocalList = append(deviceLocalList, d)
 		} else {
-			deviceNonLocalList = append(deviceNonLocalList, d)
+			ipParsed := net.ParseIP(ip)
+			switch {
+			case isRFC1918(ipParsed):
+				deviceNonRoutingList = append(deviceNonRoutingList, d)
+			case isReservedMulticast(ipParsed):
+				deviceReservedList = append(deviceReservedList, d)
+			default:
+				deviceGlobalList = append(deviceGlobalList, d)
+			}
 		}
 	} else {
-		// если нет CIDR — складываем в общий список
 		deviceList = append(deviceList, d)
 	}
 }
@@ -98,14 +142,12 @@ func recordPair(srcMAC, srcIP, dstMAC, dstIP string) bool {
 	pairSeen[key] = struct{}{}
 	pairResults = append(pairResults, flowPair{SrcMAC: srcMAC, SrcIP: srcIP, DstMAC: dstMAC, DstIP: dstIP})
 
-	// также учитываем конечные точки как уникальные устройства (MAC,IP)
 	recordDevice(srcMAC, srcIP)
 	recordDevice(dstMAC, dstIP)
 
 	return true
 }
 
-// строка маски в формате 255.255.255.0(24)
 func maskToString(m net.IPMask) string {
 	if m == nil {
 		return ""
@@ -118,9 +160,76 @@ func maskToString(m net.IPMask) string {
 	return fmt.Sprintf("%s(%d)", ip.String(), ones)
 }
 
+func normalizeMACHex(s string) string {
+	b := make([]byte, 0, 12)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			b = append(b, c)
+		case c >= 'a' && c <= 'f':
+			b = append(b, c-'a'+'A')
+		case c >= 'A' && c <= 'F':
+			b = append(b, c)
+		default:
+			// skip
+		}
+	}
+	return string(b)
+}
+
+func loadOUI(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Text()
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		// ожидаем "PREFIX<TAB>VENDOR"
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue // тихо пропускаем странные строки
+		}
+		pref := strings.TrimSpace(parts[0])
+		vend := strings.TrimSpace(parts[1])
+		if pref == "" || vend == "" {
+			continue
+		}
+		pref = strings.ToUpper(pref)
+		// на всякий: убираем возможные ':'/'-'
+		pref = normalizeMACHex(pref)
+		if len(pref) < 2 || len(pref) > 12 {
+			continue
+		}
+		ouiMap[pref] = vend
+	}
+	return scanner.Err()
+}
+
+func findVendor(mac string) string {
+	hex := normalizeMACHex(mac) // e.g. "3CEF8C36E664"
+	if hex == "" {
+		return ""
+	}
+	// пробуем 12→…→2 символов
+	for l := len(hex); l >= 2; l-- {
+		if v, ok := ouiMap[hex[:l]]; ok {
+			return v
+		}
+	}
+	return ""
+}
+
 func writeCSV() {
-	// На случай, если устройства ещё не набраны напрямую, достроим из пар
-	if len(pairResults) > 0 && (len(deviceLocalList)+len(deviceNonLocalList)+len(deviceList) == 0) {
+	if len(pairResults) > 0 && (len(deviceLocalList)+len(deviceNonRoutingList)+len(deviceGlobalList)+len(deviceReservedList)+len(deviceList) == 0) {
 		for _, p := range pairResults {
 			recordDevice(p.SrcMAC, p.SrcIP)
 			recordDevice(p.DstMAC, p.DstIP)
@@ -134,39 +243,45 @@ func writeCSV() {
 	}
 	defer f.Close()
 
-	// === РЕЖИМ ЧТЕНИЯ PCAP БЕЗ CIDR: один список без секций ===
 	if readingMode && localCIDR == nil {
-		// сортируем общий список по IP, затем по MAC
 		sort.Slice(deviceList, func(i, j int) bool {
 			if deviceList[i].IP == deviceList[j].IP {
 				return deviceList[i].MAC < deviceList[j].MAC
 			}
 			return ipLess(deviceList[i].IP, deviceList[j].IP)
 		})
-		fmt.Fprintln(f, "IP,MAC")
+		fmt.Fprintln(f, "IP,MAC,Vendor")
 		for _, d := range deviceList {
-			fmt.Fprintf(f, "%s,%s\n", d.IP, d.MAC)
+			fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
 		}
 		fmt.Printf("Results written to results.csv (%d devices)\n", len(deviceList))
 		return
 	}
 
-	// === Обычный режим (или read с указанным --cidr): секции local / non-local ===
-
-	// Сортировка по IP (а при равенстве — по MAC), отдельно в списках
 	sort.Slice(deviceLocalList, func(i, j int) bool {
 		if deviceLocalList[i].IP == deviceLocalList[j].IP {
 			return deviceLocalList[i].MAC < deviceLocalList[j].MAC
 		}
 		return ipLess(deviceLocalList[i].IP, deviceLocalList[j].IP)
 	})
-	sort.Slice(deviceNonLocalList, func(i, j int) bool {
-		if deviceNonLocalList[i].IP == deviceNonLocalList[j].IP {
-			return deviceNonLocalList[i].MAC < deviceNonLocalList[j].MAC
+	sort.Slice(deviceNonRoutingList, func(i, j int) bool {
+		if deviceNonRoutingList[i].IP == deviceNonRoutingList[j].IP {
+			return deviceNonRoutingList[i].MAC < deviceNonRoutingList[j].MAC
 		}
-		return ipLess(deviceNonLocalList[i].IP, deviceNonLocalList[j].IP)
+		return ipLess(deviceNonRoutingList[i].IP, deviceNonRoutingList[j].IP)
 	})
-	// если fallback список использовался:
+	sort.Slice(deviceGlobalList, func(i, j int) bool {
+		if deviceGlobalList[i].IP == deviceGlobalList[j].IP {
+			return deviceGlobalList[i].MAC < deviceGlobalList[j].MAC
+		}
+		return ipLess(deviceGlobalList[i].IP, deviceGlobalList[j].IP)
+	})
+	sort.Slice(deviceReservedList, func(i, j int) bool {
+		if deviceReservedList[i].IP == deviceReservedList[j].IP {
+			return deviceReservedList[i].MAC < deviceReservedList[j].MAC
+		}
+		return ipLess(deviceReservedList[i].IP, deviceReservedList[j].IP)
+	})
 	sort.Slice(deviceList, func(i, j int) bool {
 		if deviceList[i].IP == deviceList[j].IP {
 			return deviceList[i].MAC < deviceList[j].MAC
@@ -174,36 +289,48 @@ func writeCSV() {
 		return ipLess(deviceList[i].IP, deviceList[j].IP)
 	})
 
-	// Множество MAC-адресов, встретившихся в non-local (для пометки GW у local)
-	nonLocalMACs := make(map[string]struct{}, len(deviceNonLocalList))
-	for _, d := range deviceNonLocalList {
+	// для GW-метки собираем все "внешние" MAC'и (всех не-local)
+	nonLocalMACs := make(map[string]struct{})
+	for _, d := range deviceNonRoutingList {
+		nonLocalMACs[d.MAC] = struct{}{}
+	}
+	for _, d := range deviceGlobalList {
+		nonLocalMACs[d.MAC] = struct{}{}
+	}
+	for _, d := range deviceReservedList {
 		nonLocalMACs[d.MAC] = struct{}{}
 	}
 
-	// Формат секциями
-	fmt.Fprintln(f, "IP,MAC")
+	fmt.Fprintln(f, "IP,MAC,Vendor")
 	fmt.Fprintln(f, "local")
 	for _, d := range deviceLocalList {
 		if _, seenOutside := nonLocalMACs[d.MAC]; seenOutside {
-			// тот же MAC есть и в non-local → помечаем локальную запись как шлюз
-			fmt.Fprintf(f, "%s,%s,GW\n", d.IP, d.MAC)
+			fmt.Fprintf(f, "%s,%s,\"%s\",GW\n", d.IP, d.MAC, d.Vendor)
 		} else {
-			fmt.Fprintf(f, "%s,%s\n", d.IP, d.MAC)
-		}
-	}
-	fmt.Fprintln(f, "") // пустая строка-разделитель
-	fmt.Fprintln(f, "non-local")
-	for _, d := range deviceNonLocalList {
-		fmt.Fprintf(f, "%s,%s\n", d.IP, d.MAC)
-	}
-	// Если не было CIDR — выводим из fallback-списка под non-local
-	if localCIDR == nil {
-		for _, d := range deviceList {
-			fmt.Fprintf(f, "%s,%s\n", d.IP, d.MAC)
+			fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
 		}
 	}
 
-	total := len(deviceLocalList) + len(deviceNonLocalList)
+	fmt.Fprintln(f, "")
+	fmt.Fprintln(f, "non-routing")
+	for _, d := range deviceNonRoutingList {
+		fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
+
+	}
+	fmt.Fprintln(f, "")
+	fmt.Fprintln(f, "global")
+	for _, d := range deviceGlobalList {
+		fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
+
+	}
+	fmt.Fprintln(f, "")
+	fmt.Fprintln(f, "reserved")
+	for _, d := range deviceReservedList {
+		fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
+
+	}
+
+	total := len(deviceLocalList) + len(deviceNonRoutingList) + len(deviceGlobalList) + len(deviceReservedList)
 	if localCIDR == nil {
 		total = len(deviceList)
 	}
@@ -216,7 +343,6 @@ func ipLess(a, b string) bool {
 	if ipa == nil || ipb == nil {
 		return a < b
 	}
-	// сравниваем как 16-байтовые адреса
 	aa := ipa.To16()
 	bb := ipb.To16()
 	for i := 0; i < len(aa) && i < len(bb); i++ {
@@ -278,6 +404,10 @@ func getInterfaceDetails(name string) (ipStr, macStr string, cidr *net.IPNet, er
 var gWritePath string
 
 func main() {
+	if err := loadOUI("ieee-oui.txt"); err != nil {
+		// не фейлим работу сканера — просто предупреждаем
+		fmt.Fprintf(os.Stderr, "Warning: cannot load OUI db: %v\n", err)
+	}
 	fmt.Println("You can use -h or --help to list flags.")
 	fmt.Println("Example: -N 192.168.1.1 -v -t 5 -i eth0 -c")
 	fmt.Print(": ")
