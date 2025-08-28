@@ -40,11 +40,9 @@ var (
 	deviceList      []device                    // fallback/общий список
 	deviceLocalList []device
 
-	// +++ NEW: дополнительные группы +++
 	deviceNonRoutingList []device // RFC1918: 10/8, 172.16/12, 192.168/16
 	deviceGlobalList     []device // все прочие глобальные
 	deviceReservedList   []device // 224.0.0.0–239.255.255.255
-	// --- END NEW ---
 
 	localIPStr   string
 	localMACStr  string
@@ -57,7 +55,6 @@ func isBroadcastMAC(mac string) bool {
 	return strings.EqualFold(mac, "ff:ff:ff:ff:ff:ff")
 }
 
-// +++ NEW: проверки диапазонов IPv4 +++
 func isRFC1918(ip net.IP) bool {
 	ip4 := ip.To4()
 	if ip4 == nil {
@@ -82,8 +79,6 @@ func isReservedMulticast(ip net.IP) bool {
 	}
 	return ip4[0] >= 224 && ip4[0] <= 239
 }
-
-// --- END NEW ---
 
 // Запомнить уникальное устройство (MAC,IP)
 func recordDevice(mac, ip string) {
