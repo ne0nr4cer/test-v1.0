@@ -49,7 +49,16 @@ var (
 	localCIDR    *net.IPNet
 	localMaskStr string // "255.255.255.0(24)"
 	readingMode  bool   // true, если работаем в режиме -r/--read
+
+	localScanActive bool // режим активного ARP-скана (-l / --local)
+	debugEnabled    bool // включает отладочный вывод dprintf
 )
+
+func dprintf(format string, args ...interface{}) {
+	if debugEnabled {
+		fmt.Printf(format, args...)
+	}
+}
 
 func isBroadcastMAC(mac string) bool {
 	return strings.EqualFold(mac, "ff:ff:ff:ff:ff:ff")
@@ -223,7 +232,53 @@ func findVendor(mac string) string {
 	return ""
 }
 
+func nonLocalMACsAll() map[string]struct{} {
+	seen := make(map[string]struct{}, len(deviceNonRoutingList)+len(deviceGlobalList)+len(deviceReservedList))
+	for _, d := range deviceNonRoutingList {
+		seen[d.MAC] = struct{}{}
+	}
+	for _, d := range deviceGlobalList {
+		seen[d.MAC] = struct{}{}
+	}
+	for _, d := range deviceReservedList {
+		seen[d.MAC] = struct{}{}
+	}
+	return seen
+}
+
 func writeCSV() {
+
+	if localScanActive {
+		// собрать множество внешних MAC'ов (для маркировки GW)
+		seenOutside := nonLocalMACsAll() // см. helper ниже
+
+		sort.Slice(deviceLocalList, func(i, j int) bool {
+			if deviceLocalList[i].IP == deviceLocalList[j].IP {
+				return deviceLocalList[i].MAC < deviceLocalList[j].MAC
+			}
+			return ipLess(deviceLocalList[i].IP, deviceLocalList[j].IP)
+		})
+
+		f, err := os.Create("results.csv")
+		if err != nil {
+			log.Printf("Cannot create CSV file: %v", err)
+			return
+		}
+		defer f.Close()
+
+		fmt.Fprintln(f, "IP,MAC,Vendor")
+		fmt.Fprintln(f, "local")
+		for _, d := range deviceLocalList {
+			if _, ok := seenOutside[d.MAC]; ok {
+				fmt.Fprintf(f, "%s,%s,%s,GW\n", d.IP, d.MAC, findVendor(d.MAC))
+			} else {
+				fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, findVendor(d.MAC))
+			}
+		}
+		fmt.Printf("Results written to results.csv (%d devices)\n", len(deviceLocalList))
+		return
+	}
+
 	if len(pairResults) > 0 && (len(deviceLocalList)+len(deviceNonRoutingList)+len(deviceGlobalList)+len(deviceReservedList)+len(deviceList) == 0) {
 		for _, p := range pairResults {
 			recordDevice(p.SrcMAC, p.SrcIP)
@@ -424,11 +479,14 @@ func main() {
 	writePath := flags.StringP("write", "w", "", "Write captured packets to PCAP file")
 	readPath := flags.StringP("read", "r", "", "Read packets from PCAP file instead of live capture")
 	cidrStr := flags.String("cidr", "", "CIDR for local/non-local split in --read mode (e.g., 192.168.1.0/24)")
+	localScan := flags.BoolP("local", "l", false, "Active ARP scan over local CIDR (send ARP who-has to all hosts)")
 
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, "Error parsing flags:", err)
 		return
 	}
+
+	debugEnabled = *debug
 
 	if *help {
 		PrintHelp()
@@ -485,6 +543,42 @@ func main() {
 	}
 	if localCIDR != nil {
 		localMaskStr = maskToString(localCIDR.Mask)
+	}
+
+	if *localScan {
+		// гарантируем интерфейс
+		if *iface == "default" {
+			autoIf, err := detectDefaultInterface()
+			if err != nil {
+				log.Fatalf("Interface detection failed: %v", err)
+			}
+			if *verbose {
+				fmt.Printf("Auto-selected interface: %s\n", autoIf)
+			}
+			*iface = autoIf
+		}
+
+		// получаем IP/MAC/CIDR
+		var err error
+		localIPStr, localMACStr, localCIDR, err = getInterfaceDetails(*iface)
+		if err != nil {
+			log.Fatalf("Cannot get interface details for %q: %v", *iface, err)
+		}
+		localMaskStr = maskToString(localCIDR.Mask)
+		localScanActive = true
+
+		if *verbose {
+			fmt.Printf("Active ARP scan on %q  MAC:%s  IP:%s  Mask:%s\n",
+				*iface, localMACStr, localIPStr, localMaskStr)
+		}
+
+		// используем -t как окно ожидания ответов после рассылки
+		runDuration := time.Duration(*timeout) * time.Second
+		if err := activeScanLocal(*iface, 65535, true, runDuration); err != nil {
+			log.Fatalf("active scan failed: %v", err)
+		}
+		writeCSV() // при localScanActive writeCSV выведет только секцию local
+		return
 	}
 
 	if *verbose {

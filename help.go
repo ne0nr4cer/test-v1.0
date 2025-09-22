@@ -10,7 +10,7 @@ func PrintHelp() {
 	fmt.Println("  -v, --verbose        Enable verbose output")
 	fmt.Println("  -V, --version        Show version info")
 	fmt.Println("  -t, --timeout <sec>  Timeout in seconds (default: 5)")
-	fmt.Println("  -i, --interface <if> Network interface (default: \"default\")")
+	fmt.Println("  -i, --interface <if> Network interface (default: \"eth0\")")
 	fmt.Println("  -o, --output <file>  Output file path")
 	fmt.Println("  -c, --csv            Save result as CSV")
 	fmt.Println("  -n, --noping         Skip ping check")
@@ -18,6 +18,7 @@ func PrintHelp() {
 	fmt.Println("  -w, --write <file>   Write captured packets to PCAP file")
 	fmt.Println("  -r, --read <file>    Read packets from PCAP file instead of live capture")
 	fmt.Println("		 , --cidr 					CIDR for local/non-local split in --read mode")
+	fmt.Println("  -l, --local          Active ARP scan over local network (send ARP who-has to all hosts); CSV outputs only 'local' section")
 	fmt.Println()
 	fmt.Println("Use -h or --help to see this message again.")
 }
