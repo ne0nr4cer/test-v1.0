@@ -59,7 +59,6 @@ func activeScanLocal(iface string, snaplen int32, promisc bool, exitTimeout time
 						dstIP := net.IP(arp.DstProtAddress).String()
 						dprintf("RECV  ARP reply  %s is-at %s (to %s)\n",
 							srcIP, net.HardwareAddr(arp.SourceHwAddress), dstIP)
-						// регистрируем (дальше CSV и группы уже сделают своё)
 						recordPair(e.SrcMAC.String(), srcIP, e.DstMAC.String(), dstIP)
 					}
 				}
@@ -81,7 +80,6 @@ func activeScanLocal(iface string, snaplen int32, promisc bool, exitTimeout time
 		if err := sendARPRequest(handle, srcMAC, srcIP, ip); err != nil {
 			dprintf("WARN: sendARPRequest(%s) failed: %v\n", ip, err)
 		}
-		// консервативная пауза между кадрами (в arp-scan зависит от линка; здесь 1ms)
 		time.Sleep(1 * time.Millisecond)
 	}
 
