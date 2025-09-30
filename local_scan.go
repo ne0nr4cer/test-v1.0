@@ -19,6 +19,8 @@ func activeScanLocal(iface string, snaplen int32, promisc bool, exitTimeout time
 	if localCIDR == nil || localIPStr == "" || localMACStr == "" {
 		return fmt.Errorf("no interface details: IP/MAC/CIDR are empty")
 	}
+	fmt.Printf("Capturing on %q  MAC:%s  IP:%s  Mask:%s\n\n",
+		iface, localMACStr, localIPStr, maskToString(localCIDR.Mask))
 	srcIP := net.ParseIP(localIPStr).To4()
 	srcMAC, err := net.ParseMAC(localMACStr)
 	if err != nil {

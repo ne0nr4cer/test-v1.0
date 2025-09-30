@@ -35,11 +35,10 @@ type device struct {
 }
 
 var (
-	deviceSeen      = make(map[string]struct{}) // глобальное множество уникальных "MAC,IP"
-	ouiMap          = make(map[string]string)   // OUI prefix -> Vendor
-	deviceList      []device                    // fallback/общий список
-	deviceLocalList []device
-
+	deviceSeen           = make(map[string]struct{}) // глобальное множество уникальных "MAC,IP"
+	ouiMap               = make(map[string]string)   // OUI prefix -> Vendor
+	deviceList           []device                    // fallback/общий список (когда нет CIDR)
+	deviceLocalList      []device
 	deviceNonRoutingList []device // RFC1918: 10/8, 172.16/12, 192.168/16
 	deviceGlobalList     []device // все прочие глобальные
 	deviceReservedList   []device // 224.0.0.0–239.255.255.255
@@ -54,6 +53,7 @@ var (
 	debugEnabled    bool // включает отладочный вывод dprintf
 )
 
+// ---- debug print helper ----
 func dprintf(format string, args ...interface{}) {
 	if debugEnabled {
 		fmt.Printf(format, args...)
@@ -89,7 +89,7 @@ func isReservedMulticast(ip net.IP) bool {
 	return ip4[0] >= 224 && ip4[0] <= 239
 }
 
-// Запомнить уникальное устройство (MAC,IP)
+// Запомнить уникальное устройство (MAC,IP) c пропуском broadcast и собственного хоста
 func recordDevice(mac, ip string) {
 	if mac == "" || ip == "" {
 		return
@@ -97,16 +97,26 @@ func recordDevice(mac, ip string) {
 	if isBroadcastMAC(mac) {
 		return
 	}
+	// пропускаем собственный интерфейс, если известен
+	if localMACStr != "" && localIPStr != "" &&
+		strings.EqualFold(mac, localMACStr) && ip == localIPStr {
+		return
+	}
+
 	key := mac + "," + ip
 	if _, ok := deviceSeen[key]; ok {
 		return
 	}
 	deviceSeen[key] = struct{}{}
 
-	vendor := findVendor(mac) // <<< добавили
+	vendor := findVendor(mac)
+	if strings.TrimSpace(vendor) == "" {
+		vendor = "Unknown"
+	}
 
-	d := device{IP: ip, MAC: mac, Vendor: vendor} // <<< добавили Vendor
+	d := device{IP: ip, MAC: mac, Vendor: vendor}
 
+	// раскладка по группам
 	if localCIDR != nil {
 		if ipParsed := net.ParseIP(ip); ipParsed != nil && localCIDR.Contains(ipParsed) {
 			deviceLocalList = append(deviceLocalList, d)
@@ -190,9 +200,7 @@ func loadOUI(path string) error {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	lineNo := 0
 	for scanner.Scan() {
-		lineNo++
 		line := scanner.Text()
 		if len(line) == 0 || line[0] == '#' {
 			continue
@@ -200,7 +208,7 @@ func loadOUI(path string) error {
 		// ожидаем "PREFIX<TAB>VENDOR"
 		parts := strings.SplitN(line, "\t", 2)
 		if len(parts) != 2 {
-			continue // тихо пропускаем странные строки
+			continue // пропускаем странные строки
 		}
 		pref := strings.TrimSpace(parts[0])
 		vend := strings.TrimSpace(parts[1])
@@ -208,8 +216,7 @@ func loadOUI(path string) error {
 			continue
 		}
 		pref = strings.ToUpper(pref)
-		// на всякий: убираем возможные ':'/'-'
-		pref = normalizeMACHex(pref)
+		pref = normalizeMACHex(pref) // убираем ':' и '-'
 		if len(pref) < 2 || len(pref) > 12 {
 			continue
 		}
@@ -221,17 +228,21 @@ func loadOUI(path string) error {
 func findVendor(mac string) string {
 	hex := normalizeMACHex(mac) // e.g. "3CEF8C36E664"
 	if hex == "" {
-		return ""
+		return "Unknown"
 	}
-	// пробуем 12→…→2 символов
+	// пробуем по убыванию длины префикса (12 -> 2)
 	for l := len(hex); l >= 2; l-- {
 		if v, ok := ouiMap[hex[:l]]; ok {
+			if strings.TrimSpace(v) == "" {
+				return "Unknown"
+			}
 			return v
 		}
 	}
-	return ""
+	return "Unknown"
 }
 
+// все НЕ-local MAC'и (для пометки GW)
 func nonLocalMACsAll() map[string]struct{} {
 	seen := make(map[string]struct{}, len(deviceNonRoutingList)+len(deviceGlobalList)+len(deviceReservedList))
 	for _, d := range deviceNonRoutingList {
@@ -246,12 +257,11 @@ func nonLocalMACsAll() map[string]struct{} {
 	return seen
 }
 
+// ===== CSV вывод (теперь используется ТОЛЬКО при флаге -csv) =====
 func writeCSV() {
-
+	// локальный активный режим → пишем только local
 	if localScanActive {
-		// собрать множество внешних MAC'ов (для маркировки GW)
-		seenOutside := nonLocalMACsAll() // см. helper ниже
-
+		seenOutside := nonLocalMACsAll()
 		sort.Slice(deviceLocalList, func(i, j int) bool {
 			if deviceLocalList[i].IP == deviceLocalList[j].IP {
 				return deviceLocalList[i].MAC < deviceLocalList[j].MAC
@@ -270,15 +280,16 @@ func writeCSV() {
 		fmt.Fprintln(f, "local")
 		for _, d := range deviceLocalList {
 			if _, ok := seenOutside[d.MAC]; ok {
-				fmt.Fprintf(f, "%s,%s,%s,GW\n", d.IP, d.MAC, findVendor(d.MAC))
+				fmt.Fprintf(f, "%s,%s,%s,GW\n", d.IP, d.MAC, d.Vendor)
 			} else {
-				fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, findVendor(d.MAC))
+				fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
 			}
 		}
 		fmt.Printf("Results written to results.csv (%d devices)\n", len(deviceLocalList))
 		return
 	}
 
+	// добираем устройства из пар, если списки пустые
 	if len(pairResults) > 0 && (len(deviceLocalList)+len(deviceNonRoutingList)+len(deviceGlobalList)+len(deviceReservedList)+len(deviceList) == 0) {
 		for _, p := range pairResults {
 			recordDevice(p.SrcMAC, p.SrcIP)
@@ -293,6 +304,7 @@ func writeCSV() {
 	}
 	defer f.Close()
 
+	// режим чтения PCAP без CIDR → плоский список
 	if readingMode && localCIDR == nil {
 		sort.Slice(deviceList, func(i, j int) bool {
 			if deviceList[i].IP == deviceList[j].IP {
@@ -308,6 +320,7 @@ func writeCSV() {
 		return
 	}
 
+	// сортировки
 	sort.Slice(deviceLocalList, func(i, j int) bool {
 		if deviceLocalList[i].IP == deviceLocalList[j].IP {
 			return deviceLocalList[i].MAC < deviceLocalList[j].MAC
@@ -332,52 +345,33 @@ func writeCSV() {
 		}
 		return ipLess(deviceReservedList[i].IP, deviceReservedList[j].IP)
 	})
-	sort.Slice(deviceList, func(i, j int) bool {
-		if deviceList[i].IP == deviceList[j].IP {
-			return deviceList[i].MAC < deviceList[j].MAC
-		}
-		return ipLess(deviceList[i].IP, deviceList[j].IP)
-	})
 
-	// для GW-метки собираем все "внешние" MAC'и (всех не-local)
-	nonLocalMACs := make(map[string]struct{})
-	for _, d := range deviceNonRoutingList {
-		nonLocalMACs[d.MAC] = struct{}{}
-	}
-	for _, d := range deviceGlobalList {
-		nonLocalMACs[d.MAC] = struct{}{}
-	}
-	for _, d := range deviceReservedList {
-		nonLocalMACs[d.MAC] = struct{}{}
-	}
+	// для GW-метки собираем все "внешние" MAC
+	nonLocalMACs := nonLocalMACsAll()
 
 	fmt.Fprintln(f, "IP,MAC,Vendor")
 	fmt.Fprintln(f, "local")
 	for _, d := range deviceLocalList {
 		if _, seenOutside := nonLocalMACs[d.MAC]; seenOutside {
-			fmt.Fprintf(f, "%s,%s,\"%s\",GW\n", d.IP, d.MAC, d.Vendor)
+			fmt.Fprintf(f, "%s,%s,%s,GW\n", d.IP, d.MAC, d.Vendor)
 		} else {
-			fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
+			fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
 		}
 	}
-
 	fmt.Fprintln(f, "")
 	fmt.Fprintln(f, "non-routing")
 	for _, d := range deviceNonRoutingList {
-		fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
-
+		fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
 	}
 	fmt.Fprintln(f, "")
 	fmt.Fprintln(f, "global")
 	for _, d := range deviceGlobalList {
-		fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
-
+		fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
 	}
 	fmt.Fprintln(f, "")
 	fmt.Fprintln(f, "reserved")
 	for _, d := range deviceReservedList {
-		fmt.Fprintf(f, "%s,%s,\"%s\"\n", d.IP, d.MAC, d.Vendor)
-
+		fmt.Fprintf(f, "%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
 	}
 
 	total := len(deviceLocalList) + len(deviceNonRoutingList) + len(deviceGlobalList) + len(deviceReservedList)
@@ -385,6 +379,98 @@ func writeCSV() {
 		total = len(deviceList)
 	}
 	fmt.Printf("Results written to results.csv (%d devices)\n", total)
+}
+
+// ===== Консольный вывод (по умолчанию) =====
+func printResultsConsole() {
+	// режим чтения PCAP без CIDR → плоский список
+	if readingMode && localCIDR == nil {
+		sort.Slice(deviceList, func(i, j int) bool {
+			if deviceList[i].IP == deviceList[j].IP {
+				return deviceList[i].MAC < deviceList[j].MAC
+			}
+			return ipLess(deviceList[i].IP, deviceList[j].IP)
+		})
+		fmt.Println("IP,MAC,Vendor")
+		for _, d := range deviceList {
+			fmt.Printf("%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
+		}
+		return
+	}
+
+	// активный локальный скан: только local
+	if localScanActive {
+		seenOutside := nonLocalMACsAll()
+		sort.Slice(deviceLocalList, func(i, j int) bool {
+			if deviceLocalList[i].IP == deviceLocalList[j].IP {
+				return deviceLocalList[i].MAC < deviceLocalList[j].MAC
+			}
+			return ipLess(deviceLocalList[i].IP, deviceLocalList[j].IP)
+		})
+		fmt.Println("IP,MAC,Vendor")
+		fmt.Println("local")
+		for _, d := range deviceLocalList {
+			if _, ok := seenOutside[d.MAC]; ok {
+				fmt.Printf("%s,%s,%s,GW\n", d.IP, d.MAC, d.Vendor)
+			} else {
+				fmt.Printf("%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
+			}
+		}
+		return
+	}
+
+	// обычный режим: все группы
+	sort.Slice(deviceLocalList, func(i, j int) bool {
+		if deviceLocalList[i].IP == deviceLocalList[j].IP {
+			return deviceLocalList[i].MAC < deviceLocalList[j].MAC
+		}
+		return ipLess(deviceLocalList[i].IP, deviceLocalList[j].IP)
+	})
+	sort.Slice(deviceNonRoutingList, func(i, j int) bool {
+		if deviceNonRoutingList[i].IP == deviceNonRoutingList[j].IP {
+			return deviceNonRoutingList[i].MAC < deviceNonRoutingList[j].MAC
+		}
+		return ipLess(deviceNonRoutingList[i].IP, deviceNonRoutingList[j].IP)
+	})
+	sort.Slice(deviceGlobalList, func(i, j int) bool {
+		if deviceGlobalList[i].IP == deviceGlobalList[j].IP {
+			return deviceGlobalList[i].MAC < deviceGlobalList[j].MAC
+		}
+		return ipLess(deviceGlobalList[i].IP, deviceGlobalList[j].IP)
+	})
+	sort.Slice(deviceReservedList, func(i, j int) bool {
+		if deviceReservedList[i].IP == deviceReservedList[j].IP {
+			return deviceReservedList[i].MAC < deviceReservedList[j].MAC
+		}
+		return ipLess(deviceReservedList[i].IP, deviceReservedList[j].IP)
+	})
+
+	nonLocal := nonLocalMACsAll()
+
+	fmt.Println("IP,MAC,Vendor")
+	fmt.Println("local")
+	for _, d := range deviceLocalList {
+		if _, ok := nonLocal[d.MAC]; ok {
+			fmt.Printf("%s,%s,%s,GW\n", d.IP, d.MAC, d.Vendor)
+		} else {
+			fmt.Printf("%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
+		}
+	}
+	fmt.Println()
+	fmt.Println("non-routing")
+	for _, d := range deviceNonRoutingList {
+		fmt.Printf("%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
+	}
+	fmt.Println()
+	fmt.Println("global")
+	for _, d := range deviceGlobalList {
+		fmt.Printf("%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
+	}
+	fmt.Println()
+	fmt.Println("reserved")
+	for _, d := range deviceReservedList {
+		fmt.Printf("%s,%s,%s\n", d.IP, d.MAC, d.Vendor)
+	}
 }
 
 func ipLess(a, b string) bool {
@@ -458,12 +544,8 @@ func main() {
 		// не фейлим работу сканера — просто предупреждаем
 		fmt.Fprintf(os.Stderr, "Warning: cannot load OUI db: %v\n", err)
 	}
-	fmt.Println("You can use -h or --help to list flags.")
-	fmt.Println("Example: -N 192.168.1.1 -v -t 5 -i eth0 -c")
-	fmt.Print(": ")
 
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	args := strings.Fields(strings.TrimSpace(line))
+	args := os.Args[1:]
 
 	flags := pflag.NewFlagSet("scanner", pflag.ContinueOnError)
 	help := flags.BoolP("help", "h", false, "Show help message")
@@ -473,7 +555,6 @@ func main() {
 	iface := flags.StringP("interface", "i", "default", "Network interface to capture from")
 	output := flags.StringP("output", "o", "", "Output file")
 	csv := flags.BoolP("csv", "c", false, "Save result as CSV")
-	noping := flags.BoolP("noping", "n", false, "Skip ping check")
 	debug := flags.BoolP("debug", "d", false, "Enable debug mode")
 	network := flags.StringP("net", "N", "local", "Target network or IP to scan")
 	writePath := flags.StringP("write", "w", "", "Write captured packets to PCAP file")
@@ -506,7 +587,7 @@ func main() {
 				localCIDR = ipnet
 				localMaskStr = maskToString(ipnet.Mask)
 			} else {
-				fmt.Printf("Invalid --cidr value %q: %v (will write flat list)\n", *cidrStr, err)
+				fmt.Printf("Invalid --cidr value %q: %v (will print flat list)\n", *cidrStr, err)
 			}
 		}
 		if *verbose {
@@ -519,11 +600,16 @@ func main() {
 		if err := processPCAP(*readPath); err != nil {
 			log.Fatalf("Failed to read pcap: %v", err)
 		}
-		writeCSV()
+		// вывод: CSV только при -csv, иначе в консоль
+		if *csv {
+			writeCSV()
+		} else {
+			printResultsConsole()
+		}
 		return
 	}
 
-	// живой захват
+	// живой захват/локальный активный
 	if *iface == "default" {
 		autoIf, err := detectDefaultInterface()
 		if err != nil {
@@ -545,42 +631,24 @@ func main() {
 		localMaskStr = maskToString(localCIDR.Mask)
 	}
 
+	// Активный локальный скан
 	if *localScan {
-		// гарантируем интерфейс
-		if *iface == "default" {
-			autoIf, err := detectDefaultInterface()
-			if err != nil {
-				log.Fatalf("Interface detection failed: %v", err)
-			}
-			if *verbose {
-				fmt.Printf("Auto-selected interface: %s\n", autoIf)
-			}
-			*iface = autoIf
-		}
 
-		// получаем IP/MAC/CIDR
-		var err error
-		localIPStr, localMACStr, localCIDR, err = getInterfaceDetails(*iface)
-		if err != nil {
-			log.Fatalf("Cannot get interface details for %q: %v", *iface, err)
-		}
-		localMaskStr = maskToString(localCIDR.Mask)
 		localScanActive = true
-
-		if *verbose {
-			fmt.Printf("Active ARP scan on %q  MAC:%s  IP:%s  Mask:%s\n",
-				*iface, localMACStr, localIPStr, localMaskStr)
-		}
-
-		// используем -t как окно ожидания ответов после рассылки
 		runDuration := time.Duration(*timeout) * time.Second
 		if err := activeScanLocal(*iface, 65535, true, runDuration); err != nil {
 			log.Fatalf("active scan failed: %v", err)
 		}
-		writeCSV() // при localScanActive writeCSV выведет только секцию local
+		// вывод: CSV только при -csv, иначе в консоль (только local)
+		if *csv {
+			writeCSV()
+		} else {
+			printResultsConsole()
+		}
 		return
 	}
 
+	// Пассивный режим
 	if *verbose {
 		fmt.Println("Parsed options:")
 		fmt.Printf("  ip:             %s\n", *network)
@@ -589,7 +657,6 @@ func main() {
 		fmt.Printf("  -i/--interface: %s\n", *iface)
 		fmt.Printf("  -o/--output:    %q\n", *output)
 		fmt.Printf("  -c/--csv:       %t\n", *csv)
-		fmt.Printf("  -n/--noping:    %t\n", *noping)
 		fmt.Printf("  -d/--debug:     %t\n", *debug)
 		fmt.Printf("  -w/--write:     %q\n", *writePath)
 		fmt.Printf("  -r/--read:      %q\n", *readPath)
@@ -604,7 +671,12 @@ func main() {
 	gWritePath = *writePath // запомнили путь для записи pcap (если задан)
 	captureMACs(*iface, 65535, true, runDuration)
 
-	writeCSV()
+	// вывод: CSV только при -csv, иначе в консоль
+	if *csv {
+		writeCSV()
+	} else {
+		printResultsConsole()
+	}
 }
 
 // живой захват (с таймером); если gWritePath задан — пишем pcap
@@ -638,7 +710,7 @@ func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Dur
 	timer := time.NewTimer(exitTimeout)
 	defer timer.Stop()
 
-	// Обновлённая строка старта с MAC, IP и маской интерфейса
+	// Баннер (с таймером)
 	if localIPStr != "" || localMACStr != "" {
 		fmt.Printf("Capturing on %q  MAC:%s  IP:%s  Mask:%s  (will stop after %v)...\n\n", iface, localMACStr, localIPStr, localMaskStr, exitTimeout)
 	} else {
@@ -665,7 +737,7 @@ func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Dur
 					arp := arpL.(*layers.ARP)
 					srcIP := net.IP(arp.SourceProtAddress).String()
 					dstIP := net.IP(arp.DstProtAddress).String()
-					fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
+					dprintf("ARP: Src MAC:%s IP:%s  ->  Dst MAC:%s IP:%s\n",
 						e.SrcMAC, srcIP, e.DstMAC, dstIP)
 
 					recordPair(e.SrcMAC.String(), srcIP, e.DstMAC.String(), dstIP)
@@ -673,13 +745,13 @@ func captureMACs(iface string, snaplen int32, promisc bool, exitTimeout time.Dur
 				}
 				if ip4L := packet.Layer(layers.LayerTypeIPv4); ip4L != nil {
 					ip4 := ip4L.(*layers.IPv4)
-					fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
+					dprintf("IP4: Src MAC:%s IP:%s  ->  Dst MAC:%s IP:%s\n",
 						e.SrcMAC, ip4.SrcIP, e.DstMAC, ip4.DstIP)
 
 					recordPair(e.SrcMAC.String(), ip4.SrcIP.String(), e.DstMAC.String(), ip4.DstIP.String())
 					continue
 				}
-				fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
+				dprintf("ETH: Src MAC:%s  ->  Dst MAC:%s\n", e.SrcMAC, e.DstMAC)
 			}
 		case <-timer.C:
 			fmt.Printf("\nExit timeout reached (%v). Stopping capture.\n", exitTimeout)
@@ -706,7 +778,7 @@ func processPCAP(path string) error {
 				arp := arpL.(*layers.ARP)
 				srcIP := net.IP(arp.SourceProtAddress).String()
 				dstIP := net.IP(arp.DstProtAddress).String()
-				fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
+				dprintf("ARP: Src MAC:%s IP:%s  ->  Dst MAC:%s IP:%s\n",
 					e.SrcMAC, srcIP, e.DstMAC, dstIP)
 
 				recordPair(e.SrcMAC.String(), srcIP, e.DstMAC.String(), dstIP)
@@ -714,13 +786,13 @@ func processPCAP(path string) error {
 			}
 			if ip4L := packet.Layer(layers.LayerTypeIPv4); ip4L != nil {
 				ip4 := ip4L.(*layers.IPv4)
-				fmt.Printf("Src MAC: %s IP: %s, Dst MAC: %s IP: %s\n",
+				dprintf("IP4: Src MAC:%s IP:%s  ->  Dst MAC:%s IP:%s\n",
 					e.SrcMAC, ip4.SrcIP, e.DstMAC, ip4.DstIP)
 
 				recordPair(e.SrcMAC.String(), ip4.SrcIP.String(), e.DstMAC.String(), ip4.DstIP.String())
 				continue
 			}
-			fmt.Printf("Src MAC: %s, Dst MAC: %s\n", e.SrcMAC, e.DstMAC)
+			dprintf("ETH: Src MAC:%s  ->  Dst MAC:%s\n", e.SrcMAC, e.DstMAC)
 		}
 	}
 	return nil

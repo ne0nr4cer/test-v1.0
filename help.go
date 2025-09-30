@@ -13,7 +13,6 @@ func PrintHelp() {
 	fmt.Println("  -i, --interface <if> Network interface (default: \"eth0\")")
 	fmt.Println("  -o, --output <file>  Output file path")
 	fmt.Println("  -c, --csv            Save result as CSV")
-	fmt.Println("  -n, --noping         Skip ping check")
 	fmt.Println("  -d, --debug          Enable debug mode")
 	fmt.Println("  -w, --write <file>   Write captured packets to PCAP file")
 	fmt.Println("  -r, --read <file>    Read packets from PCAP file instead of live capture")
